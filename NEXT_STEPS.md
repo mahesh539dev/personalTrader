@@ -1,4 +1,4 @@
-# Next Steps — Deploy the Trading System
+# Next Steps - Deploy the Trading System
 
 ## 1. Create a Telegram Bot
 - Open Telegram, message `@BotFather`
@@ -64,4 +64,4 @@ TZ=America/New_York
 - Create Alpaca **live** API keys
 - Change `ALPACA_PAPER=false` in Railway env vars
 - Change `ALPACA_API_KEY` and `ALPACA_SECRET_KEY` to live keys
-- The system is identical — just real money instead of paper
+- The system is identical - just real money instead of paper
