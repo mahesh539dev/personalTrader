@@ -45,7 +45,7 @@ def _ask(prompt: str, max_tokens: int = 500) -> str | None:
     try:
         if provider == "claude":
             response = client.messages.create(
-                model="claude-sonnet-4-5-20250514",
+                model="claude-haiku-5-5",
                 max_tokens=max_tokens,
                 messages=[{"role": "user", "content": prompt}],
             )
