@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block title %}Analysis — Day Trader{% endblock %}
+
+{% block content %}
+<div class="filter-bar">
+    <span>Period:</span>
+    <a href="?days=7" class="{% if days == 7 %}active{% endif %}">7d</a>
+    <a href="?days=14" class="{% if days == 14 %}active{% endif %}">14d</a>
+    <a href="?days=30" class="{% if days == 30 %}active{% endif %}">30d</a>
+    <a href="?days=90" class="{% if days == 90 %}active{% endif %}">90d</a>
+</div>
+
+<div class="card-row">
+    <div class="card">
+        <h2>P&L by Setup</h2>
+        <canvas id="setupChart" height="120"></canvas>
+    </div>
+    <div class="card">
+        <h2>Win Rate by Setup</h2>
+        <canvas id="winRateChart" height="120"></canvas>
+    </div>
+</div>
+
+<div class="card-row">
+    <div class="card">
+        <h2>Performance by Setup</h2>
+        {% if setups %}
+        <table>
+            <thead><tr><th>Setup</th><th>Trades</th><th>Wins</th><th>Win%</th><th>Avg R</th><th>Total P&L</th></tr></thead>
+            <tbody>
+            {% for s in setups %}
+            <tr>
+                <td>{{ s.setup or 'unknown' }}</td>
+                <td>{{ s.total }}</td>
+                <td>{{ s.wins }}</td>
+                <td class="{% if (s.win_pct or 0) >= 50 %}text-green{% else %}text-red{% endif %}">{{ s.win_pct }}%</td>
+                <td class="{% if (s.avg_r or 0) >= 0 %}text-green{% else %}text-red{% endif %}">{{ s.avg_r }}R</td>
+                <td class="{% if (s.total_pnl or 0) >= 0 %}text-green{% else %}text-red{% endif %}">${{ "%.2f"|format(s.total_pnl or 0) }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p class="empty">No completed trades in this period.</p>
+        {% endif %}
+    </div>
+
+    <div class="card">
+        <h2>Performance by Day of Week</h2>
+        {% if dow_stats %}
+        <table>
+            <thead><tr><th>Day</th><th>Trades</th><th>Wins</th><th>Win%</th><th>P&L</th></tr></thead>
+            <tbody>
+            {% for d in dow_stats %}
+            <tr>
+                <td>{{ d.day_name }}</td>
+                <td>{{ d.total }}</td>
+                <td>{{ d.wins }}</td>
+                <td class="{% if d.win_pct >= 50 %}text-green{% else %}text-red{% endif %}">{{ d.win_pct }}%</td>
+                <td class="{% if (d.total_pnl or 0) >= 0 %}text-green{% else %}text-red{% endif %}">${{ "%.2f"|format(d.total_pnl or 0) }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p class="empty">No completed trades in this period.</p>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+fetch('/api/pnl-by-setup?days={{ days }}')
+    .then(r => r.json())
+    .then(data => {
+        if (!data.labels.length) return;
+        const colors = data.total_pnl.map(v => v >= 0 ? '#22c55e' : '#ef4444');
+        new Chart(document.getElementById('setupChart'), {
+            type: 'bar',
+            data: {
+                labels: data.labels,
+                datasets: [{
+                    label: 'P&L ($)',
+                    data: data.total_pnl,
+                    backgroundColor: colors,
+                    borderRadius: 4,
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: { grid: { display: false }, ticks: { color: '#94a3b8' } },
+                    y: { grid: { color: '#1e293b' }, ticks: { color: '#94a3b8', callback: v => '$' + v } }
+                }
+            }
+        });
+        new Chart(document.getElementById('winRateChart'), {
+            type: 'bar',
+            data: {
+                labels: data.labels,
+                datasets: [{
+                    label: 'Win Rate (%)',
+                    data: data.win_pct,
+                    backgroundColor: data.win_pct.map(v => v >= 50 ? '#22c55e' : '#ef4444'),
+                    borderRadius: 4,
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: { grid: { display: false }, ticks: { color: '#94a3b8' } },
+                    y: { grid: { color: '#1e293b' }, ticks: { color: '#94a3b8', callback: v => v + '%' }, max: 100 }
+                }
+            }
+        });
+    });
+</script>
+{% endblock %}

@@ -1,0 +1,16 @@
+.env
+*.pyc
+__pycache__/
+trader/state/
+trader/universe.txt
+trader/watchlist.json
+trader/entry.json
+trader/plan.json
+trader/timemachine.json
+trader/orders.json
+trader/portfolio.json
+trader/prices.json
+trader/alerts.json
+trader/metrics.json
+trader/daily-report.md
+.claude/
