@@ -77,12 +77,38 @@ def _format_ticket(order: dict, plan: dict | None, tm: dict | None,
             lines.append(f"History: {round(100 * h_wins / h_total)}% win rate over {h_total} past sessions")
         lines.append("")
 
+    # Market context
+    mkt = order.get("market_context")
+    if mkt:
+        spy = mkt.get("spy_change_pct")
+        qqq = mkt.get("qqq_change_pct")
+        trend = mkt.get("trend", "?")
+        parts = []
+        if spy is not None:
+            parts.append(f"SPY {spy:+.2f}%")
+        if qqq is not None:
+            parts.append(f"QQQ {qqq:+.2f}%")
+        lines.append(f"Market: {', '.join(parts)} ({trend})")
+
+    # Earnings warning
+    earn = order.get("earnings_warning")
+    if earn:
+        lines.append(f"!! {earn}")
+
+    lines.append("")
+
     # Risk verdict
     if risk_result:
         verdict = risk_result.get("verdict", "?")
         lines.append(f"Risk check: {verdict}")
         for reason in risk_result.get("reasons", []):
             lines.append(f"  - {reason}")
+
+    # AI technical analysis
+    ai = order.get("ai_reasoning")
+    if ai:
+        lines.append("")
+        lines.append(f"AI analysis:\n{ai}")
 
     lines.append(f"\n(Trade #{trade_id})")
     return "\n".join(lines)

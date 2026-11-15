@@ -1,12 +1,16 @@
 """AI-powered analysis layer using Claude or OpenAI.
 
-Provides news sentiment analysis, trade reasoning, and market context.
+Provides news sentiment analysis, trade reasoning, market context,
+earnings calendar checks, sector/market trend context, and enhanced
+technical analysis reasoning.
 Falls back gracefully if no AI API key is configured.
 """
 
 import json
 import logging
 import os
+import urllib.error
+import urllib.request
 
 from cloud import config
 
@@ -122,6 +126,161 @@ def daily_market_briefing(scan_summary: str, news_summary: str) -> str | None:
         f"Focus on what matters for intraday trading today. No fluff.",
         max_tokens=250,
     )
+
+
+def generate_technical_reasoning(plan: dict, tm: dict | None, risk: dict | None,
+                                 market_ctx: dict | None = None,
+                                 earnings_warning: str | None = None) -> str | None:
+    """Enhanced trade reasoning that includes technical context and market trend."""
+    if not plan:
+        return None
+
+    context = {
+        "symbol": plan.get("symbol"),
+        "setup": plan.get("setup"),
+        "entry": plan.get("entry"),
+        "stop": plan.get("stop"),
+        "target": plan.get("target"),
+        "reward_risk": plan.get("reward_risk"),
+        "risk_per_share": plan.get("risk_per_share"),
+    }
+
+    or_data = plan.get("opening_range") or {}
+    if or_data:
+        entry = plan.get("entry") or 0
+        or_high = or_data.get("high") or 0
+        or_low = or_data.get("low") or 0
+        context["or_high"] = or_high
+        context["or_low"] = or_low
+        context["or_range_pct"] = round((or_high - or_low) / or_low * 100, 2) if or_low else None
+        context["entry_vs_or_high_pct"] = round((entry - or_high) / or_high * 100, 2) if or_high else None
+
+    if tm:
+        sim = tm.get("simulation", {})
+        hist = tm.get("history", {})
+        context["mc_target_pct"] = sim.get("target_pct")
+        context["mc_stop_pct"] = sim.get("stop_pct")
+        context["mc_neither_pct"] = sim.get("neither_pct")
+        context["mc_avg_r"] = sim.get("avg_r")
+        context["history_wins"] = hist.get("wins")
+        context["history_total"] = hist.get("total")
+
+    if market_ctx:
+        context["spy_change_pct"] = market_ctx.get("spy_change_pct")
+        context["qqq_change_pct"] = market_ctx.get("qqq_change_pct")
+        context["market_trend"] = market_ctx.get("trend")
+
+    if earnings_warning:
+        context["earnings_warning"] = earnings_warning
+
+    return _ask(
+        f"You are a day trading analyst. Analyze this ORB trade and give:\n"
+        f"1. Technical assessment (opening range size, entry quality, stop distance)\n"
+        f"2. Market alignment (is the trade with or against the market trend?)\n"
+        f"3. One-line verdict: take it, skip it, or size down\n\n"
+        f"{json.dumps(context, indent=2)}\n\n"
+        f"Be specific about numbers. 4-5 lines max.",
+        max_tokens=300,
+    )
+
+
+# ── Market context (no AI needed) ──
+
+_YAHOO_UA = "Mozilla/5.0 (compatible; day-trader-skill/2.0)"
+_YAHOO_HOSTS = ("https://query2.finance.yahoo.com", "https://query1.finance.yahoo.com")
+
+
+def _yahoo_get(path: str, timeout: int = 15) -> str | None:
+    for host in _YAHOO_HOSTS:
+        try:
+            req = urllib.request.Request(host + path, headers={"User-Agent": _YAHOO_UA})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.read().decode("utf-8", "replace")
+        except Exception:
+            continue
+    return None
+
+
+def get_market_context() -> dict | None:
+    """Fetch SPY and QQQ intraday change to gauge market direction.
+
+    Returns {"spy_change_pct": float, "qqq_change_pct": float, "trend": str} or None.
+    """
+    try:
+        text = _yahoo_get("/v7/finance/spark?symbols=SPY,QQQ&range=1d&interval=5m")
+        if not text:
+            return None
+        data = json.loads(text)
+        spark = data.get("spark", {})
+        results = {}
+        for item in spark.get("result", []):
+            sym = item.get("symbol", "")
+            resp = (item.get("response") or [{}])[0]
+            meta = resp.get("meta", {})
+            prev = meta.get("chartPreviousClose") or meta.get("previousClose")
+            price = meta.get("regularMarketPrice")
+            if prev and price:
+                results[sym] = round((price - prev) / prev * 100, 2)
+
+        spy = results.get("SPY")
+        qqq = results.get("QQQ")
+        if spy is None and qqq is None:
+            return None
+
+        avg = ((spy or 0) + (qqq or 0)) / (bool(spy) + bool(qqq))
+        if avg > 0.3:
+            trend = "bullish"
+        elif avg < -0.3:
+            trend = "bearish"
+        else:
+            trend = "neutral"
+
+        return {"spy_change_pct": spy, "qqq_change_pct": qqq, "trend": trend}
+    except Exception as e:
+        log.warning("Market context fetch failed: %s", e)
+        return None
+
+
+def check_earnings_calendar(symbol: str) -> str | None:
+    """Check if a symbol has earnings today or tomorrow via Yahoo Finance.
+
+    Returns a warning string if earnings are imminent, None otherwise.
+    """
+    try:
+        text = _yahoo_get(
+            f"/v10/finance/quoteSummary/{symbol.upper().replace('.', '-')}"
+            f"?modules=calendarEvents"
+        )
+        if not text:
+            return None
+        data = json.loads(text)
+        result = (data.get("quoteSummary", {}).get("result") or [{}])[0]
+        cal = result.get("calendarEvents", {}).get("earnings", {})
+        date_raw = cal.get("earningsDate", [])
+        if not date_raw:
+            return None
+
+        import datetime
+        today = datetime.date.today()
+        for d in date_raw:
+            fmt = d.get("fmt")
+            if not fmt:
+                continue
+            try:
+                earnings_date = datetime.date.fromisoformat(fmt)
+            except ValueError:
+                continue
+            diff = (earnings_date - today).days
+            if diff == 0:
+                return f"EARNINGS TODAY ({fmt}) -- high risk of gap/halt, consider skipping"
+            elif diff == 1:
+                return f"EARNINGS TOMORROW ({fmt}) -- holding overnight is risky"
+            elif diff == -1:
+                return f"EARNINGS WERE YESTERDAY ({fmt}) -- price may still be volatile"
+        return None
+    except Exception as e:
+        log.warning("Earnings check failed for %s: %s", symbol, e)
+        return None
 
 
 def post_trade_review(trades: list[dict]) -> str | None:

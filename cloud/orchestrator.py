@@ -13,6 +13,12 @@ import time
 from datetime import date, datetime, timedelta
 
 from cloud import config, db
+from cloud.ai_analyst import (
+    check_earnings_calendar,
+    daily_market_briefing,
+    generate_technical_reasoning,
+    get_market_context,
+)
 from cloud.alpaca_client import AlpacaClient, AlpacaError
 
 log = logging.getLogger(__name__)
@@ -94,6 +100,19 @@ async def premarket_scan(bot_send_fn=None):
         for setup, tickers in setups_summary.items():
             lines.append(f"  {setup}: {', '.join(tickers[:5])}")
 
+        # Check earnings for top hits and warn
+        for sym in symbols[:5]:
+            warning = check_earnings_calendar(sym)
+            if warning:
+                lines.append(f"  {sym}: {warning}")
+
+        # AI briefing (optional)
+        scan_text = "\n".join(f"{s}: {', '.join(t)}" for s, t in setups_summary.items())
+        news_text = r.stdout[:500] if r.stdout else "No news checked"
+        briefing = daily_market_briefing(scan_text, news_text)
+        if briefing:
+            lines.append(f"\n{briefing}")
+
         if bot_send_fn:
             await bot_send_fn("\n".join(lines))
 
@@ -130,12 +149,20 @@ async def orb_scan(bot_send_fn=None, send_trade_fn=None):
         db.insert_scan("orb", date.today(), len(symbols), symbols[:50],
                        raw_output=r.stdout[:2000])
 
+        # Fetch market context once for this scan cycle
+        market_ctx = get_market_context()
+        if market_ctx:
+            trend = market_ctx.get("trend", "?")
+            spy = market_ctx.get("spy_change_pct", 0)
+            qqq = market_ctx.get("qqq_change_pct", 0)
+            log.info("Market context: SPY %+.2f%%, QQQ %+.2f%% (%s)", spy, qqq, trend)
+
         # Process top ORB hits through the full pipeline
         already_proposed = {t["symbol"] for t in db.get_todays_trades()}
         new_hits = [h for h in watchlist["hits"] if h["symbol"] not in already_proposed]
 
         for hit in new_hits[:3]:
-            await _process_hit(hit, steps, send_trade_fn)
+            await _process_hit(hit, steps, send_trade_fn, market_ctx=market_ctx)
 
         db.finish_pipeline_run(run_id, "completed", steps)
 
@@ -144,13 +171,22 @@ async def orb_scan(bot_send_fn=None, send_trade_fn=None):
         db.finish_pipeline_run(run_id, "failed", steps, str(e))
 
 
-async def _process_hit(hit: dict, steps: dict, send_trade_fn=None):
-    """Run the full pipeline for a single ORB hit: entry -> exit -> timemachine -> budget -> risk."""
+async def _process_hit(hit: dict, steps: dict, send_trade_fn=None, market_ctx: dict | None = None):
+    """Run the full pipeline for a single ORB hit: earnings check -> entry -> exit -> timemachine -> budget -> risk."""
     symbol = hit["symbol"]
     log.info("Processing hit: %s", symbol)
 
-    # Entry check
-    r = run_tool("trader-entry/entry.py", ["check", symbol, "--setup", "orb", "--write"])
+    # Earnings calendar check -- skip if earnings today (high gap/halt risk)
+    earnings_warning = check_earnings_calendar(symbol)
+    if earnings_warning and "EARNINGS TODAY" in earnings_warning:
+        log.info("%s: skipping -- %s", symbol, earnings_warning)
+        steps[f"earnings_{symbol}"] = {"skipped": True, "reason": earnings_warning}
+        return
+
+    # Entry check with volume confirmation (trigger bar must have >= 1x range avg volume)
+    r = run_tool("trader-entry/entry.py", [
+        "check", symbol, "--setup", "orb", "--min-volume-x", "1.0", "--write",
+    ])
     steps[f"entry_{symbol}"] = {"exit_code": r.returncode}
 
     entry = read_trader_json("entry.json")
@@ -171,6 +207,13 @@ async def _process_hit(hit: dict, steps: dict, send_trade_fn=None):
     steps[f"timemachine_{symbol}"] = {"exit_code": r.returncode}
 
     tm = read_trader_json("timemachine.json")
+
+    # AI-enhanced technical reasoning (runs in parallel with sizing conceptually)
+    ai_reasoning = generate_technical_reasoning(
+        plan, tm, None, market_ctx=market_ctx, earnings_warning=earnings_warning,
+    )
+    if ai_reasoning:
+        log.info("%s AI reasoning: %s", symbol, ai_reasoning[:200])
 
     # Fresh quote for sizing
     run_tool("trader-alerts/alerts.py", ["quote", symbol, "--write"])
@@ -196,6 +239,14 @@ async def _process_hit(hit: dict, steps: dict, send_trade_fn=None):
         order_data = orders["orders"][result["index"] - 1] if result["index"] <= len(orders["orders"]) else None
         if not order_data:
             continue
+
+        # Attach extra context to the order for the Telegram ticket
+        if ai_reasoning:
+            order_data["ai_reasoning"] = ai_reasoning
+        if market_ctx:
+            order_data["market_context"] = market_ctx
+        if earnings_warning:
+            order_data["earnings_warning"] = earnings_warning
 
         # Extract Monte Carlo results
         mc_target = mc_stop = mc_neither = None
