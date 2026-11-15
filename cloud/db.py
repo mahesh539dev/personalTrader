@@ -224,13 +224,15 @@ def finish_pipeline_run(run_id: int, status: str = "completed",
 
 def win_rate_by_setup(days: int = 30) -> list[dict]:
     return fetch_all(
-        """SELECT setup, COUNT(*) as total,
-            COUNT(*) FILTER (WHERE pnl > 0) as wins,
-            ROUND(100.0 * COUNT(*) FILTER (WHERE pnl > 0) / NULLIF(COUNT(*), 0), 1) as win_pct,
-            ROUND(AVG(pnl_r)::numeric, 2) as avg_r,
-            ROUND(SUM(pnl)::numeric, 2) as total_pnl
-        FROM trade_pairs WHERE date >= CURRENT_DATE - %s
-        GROUP BY setup ORDER BY total DESC""",
+        """SELECT COALESCE(t.setup, 'unknown') as setup, COUNT(*) as total,
+            COUNT(*) FILTER (WHERE tp.pnl > 0) as wins,
+            ROUND(100.0 * COUNT(*) FILTER (WHERE tp.pnl > 0) / NULLIF(COUNT(*), 0), 1) as win_pct,
+            ROUND(AVG(tp.pnl_r)::numeric, 2) as avg_r,
+            ROUND(SUM(tp.pnl)::numeric, 2) as total_pnl
+        FROM trade_pairs tp
+        LEFT JOIN trades t ON t.id = tp.entry_id
+        WHERE tp.date >= CURRENT_DATE - %s
+        GROUP BY t.setup ORDER BY total DESC""",
         (days,),
     )
 
