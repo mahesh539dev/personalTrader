@@ -8,3 +8,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 RUN mkdir -p trader/state
+
+CMD ["python3", "cloud/main.py"]
