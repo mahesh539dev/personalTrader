@@ -9,4 +9,6 @@ COPY . .
 
 RUN mkdir -p trader/state
 
+ENV PYTHONPATH=/app
+
 CMD ["python3", "cloud/main.py"]
