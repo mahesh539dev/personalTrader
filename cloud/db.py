@@ -220,6 +220,59 @@ def finish_pipeline_run(run_id: int, status: str = "completed",
     )
 
 
+# ── Scan hits (persistent ORB hits) ──
+
+def upsert_scan_hit(scan_date: date, symbol: str, scan_type: str = "orb",
+                    scan_time: str | None = None, hit_data: dict | None = None) -> int:
+    import json
+    row = fetch_one(
+        """INSERT INTO scan_hits (date, symbol, scan_type, scan_time, hit_data)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (date, symbol, scan_type) DO UPDATE SET
+            scan_time = EXCLUDED.scan_time, hit_data = EXCLUDED.hit_data
+        RETURNING id""",
+        (scan_date, symbol, scan_type, scan_time,
+         json.dumps(hit_data) if hit_data else None),
+    )
+    return row["id"]
+
+
+def get_pending_scan_hits(scan_date: date | None = None,
+                          scan_type: str = "orb") -> list[dict]:
+    scan_date = scan_date or date.today()
+    return fetch_all(
+        """SELECT * FROM scan_hits
+        WHERE date = %s AND scan_type = %s AND status = 'pending'
+        ORDER BY created_at""",
+        (scan_date, scan_type),
+    )
+
+
+def get_daily_setups_for_symbol(symbol: str, scan_date: date | None = None) -> list[str]:
+    """Return the daily setup names for a symbol from today's premarket scan."""
+    scan_date = scan_date or date.today()
+    row = fetch_one(
+        """SELECT hit_data FROM scan_hits
+        WHERE date = %s AND symbol = %s AND scan_type = 'daily'""",
+        (scan_date, symbol),
+    )
+    if not row or not row.get("hit_data"):
+        return []
+    import json
+    data = row["hit_data"]
+    if isinstance(data, str):
+        data = json.loads(data)
+    return data.get("setups", [])
+
+
+def update_scan_hit(hit_id: int, status: str, skip_reason: str | None = None) -> None:
+    execute(
+        """UPDATE scan_hits SET status = %s, skip_reason = %s, processed_at = NOW()
+        WHERE id = %s""",
+        (status, skip_reason, hit_id),
+    )
+
+
 # ── Dashboard queries ──
 
 def win_rate_by_setup(days: int = 30) -> list[dict]:

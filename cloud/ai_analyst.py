@@ -133,7 +133,8 @@ def daily_market_briefing(scan_summary: str, news_summary: str) -> str | None:
 
 def generate_technical_reasoning(plan: dict, tm: dict | None, risk: dict | None,
                                  market_ctx: dict | None = None,
-                                 earnings_warning: str | None = None) -> str | None:
+                                 earnings_warning: str | None = None,
+                                 daily_setups: list[str] | None = None) -> str | None:
     """Enhanced trade reasoning that includes technical context and market trend."""
     if not plan:
         return None
@@ -176,14 +177,25 @@ def generate_technical_reasoning(plan: dict, tm: dict | None, risk: dict | None,
     if earnings_warning:
         context["earnings_warning"] = earnings_warning
 
+    if daily_setups:
+        context["daily_setups"] = daily_setups
+
+    daily_line = ""
+    if daily_setups:
+        daily_line = (
+            f"3. Daily setup alignment ({', '.join(daily_setups)} found in premarket scan "
+            f"— does this strengthen or weaken the ORB case?)\n"
+        )
+
     return _ask(
         f"You are a day trading analyst. Analyze this ORB trade and give:\n"
         f"1. Technical assessment (opening range size, entry quality, stop distance)\n"
         f"2. Market alignment (is the trade with or against the market trend?)\n"
-        f"3. One-line verdict: take it, skip it, or size down\n\n"
+        f"{daily_line}"
+        f"{'4' if daily_setups else '3'}. One-line verdict: take it, skip it, or size down\n\n"
         f"{json.dumps(context, indent=2)}\n\n"
-        f"Be specific about numbers. 4-5 lines max.",
-        max_tokens=300,
+        f"Be specific about numbers. {'5-6' if daily_setups else '4-5'} lines max.",
+        max_tokens=350,
     )
 
 

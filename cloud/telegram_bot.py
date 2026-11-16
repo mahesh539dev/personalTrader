@@ -90,6 +90,11 @@ def _format_ticket(order: dict, plan: dict | None, tm: dict | None,
             parts.append(f"QQQ {qqq:+.2f}%")
         lines.append(f"Market: {', '.join(parts)} ({trend})")
 
+    # Daily setup alignment
+    daily = order.get("daily_setups")
+    if daily:
+        lines.append(f"Daily setups: {', '.join(daily)} (premarket match)")
+
     # Earnings warning
     earn = order.get("earnings_warning")
     if earn:

@@ -85,6 +85,16 @@ async def premarket_scan(bot_send_fn=None):
         db.insert_scan("daily", date.today(), hit_count, symbols[:50],
                        steps["daily"].get("duration_ms"), r.stdout[:2000])
 
+        # Persist each daily hit to scan_hits for ORB cross-referencing
+        for h in watchlist["hits"]:
+            hit_id = db.upsert_scan_hit(
+                scan_date=date.today(),
+                symbol=h["symbol"],
+                scan_type="daily",
+                hit_data={"setups": h.get("setups", [])},
+            )
+            db.update_scan_hit(hit_id, status="processed")
+
         # News check on top hits
         top_tickers = ",".join(symbols[:10])
         r = run_tool("trader-news/news.py", ["--tickers", top_tickers, "--hours", "12"])
@@ -149,20 +159,18 @@ async def orb_scan(bot_send_fn=None, send_trade_fn=None):
         db.insert_scan("orb", date.today(), len(symbols), symbols[:50],
                        raw_output=r.stdout[:2000])
 
-        # Fetch market context once for this scan cycle
-        market_ctx = get_market_context()
-        if market_ctx:
-            trend = market_ctx.get("trend", "?")
-            spy = market_ctx.get("spy_change_pct", 0)
-            qqq = market_ctx.get("qqq_change_pct", 0)
-            log.info("Market context: SPY %+.2f%%, QQQ %+.2f%% (%s)", spy, qqq, trend)
+        # Persist each hit to the database so they survive redeploys
+        for h in watchlist["hits"]:
+            db.upsert_scan_hit(
+                scan_date=date.today(),
+                symbol=h["symbol"],
+                scan_type="orb",
+                scan_time=at_time,
+                hit_data=h,
+            )
 
-        # Process top ORB hits through the full pipeline
-        already_proposed = {t["symbol"] for t in db.get_todays_trades()}
-        new_hits = [h for h in watchlist["hits"] if h["symbol"] not in already_proposed]
-
-        for hit in new_hits[:3]:
-            await _process_hit(hit, steps, send_trade_fn, market_ctx=market_ctx)
+        # Process pending hits (includes ones from earlier scans today)
+        await _process_pending_orb_hits(steps, bot_send_fn, send_trade_fn)
 
         db.finish_pipeline_run(run_id, "completed", steps)
 
@@ -171,7 +179,54 @@ async def orb_scan(bot_send_fn=None, send_trade_fn=None):
         db.finish_pipeline_run(run_id, "failed", steps, str(e))
 
 
-async def _process_hit(hit: dict, steps: dict, send_trade_fn=None, market_ctx: dict | None = None):
+async def _process_pending_orb_hits(steps: dict, bot_send_fn=None, send_trade_fn=None):
+    """Process all pending ORB hits from today, including from earlier scans."""
+    market_ctx = get_market_context()
+    if market_ctx:
+        trend = market_ctx.get("trend", "?")
+        spy = market_ctx.get("spy_change_pct", 0)
+        qqq = market_ctx.get("qqq_change_pct", 0)
+        log.info("Market context: SPY %+.2f%%, QQQ %+.2f%% (%s)", spy, qqq, trend)
+
+    already_proposed = {t["symbol"] for t in db.get_todays_trades()}
+    pending = db.get_pending_scan_hits(date.today(), "orb")
+    new_hits = [h for h in pending if h["symbol"] not in already_proposed]
+
+    if not new_hits:
+        return
+
+    log.info("Processing %d pending ORB hits", len(new_hits))
+    for hit_row in new_hits[:3]:
+        hit_data = hit_row.get("hit_data") or {"symbol": hit_row["symbol"]}
+        if isinstance(hit_data, str):
+            import json as _json
+            hit_data = _json.loads(hit_data)
+        await _process_hit(
+            hit_data, steps, send_trade_fn,
+            market_ctx=market_ctx, hit_id=hit_row["id"],
+        )
+
+
+async def resume_pending_hits(bot_send_fn=None, send_trade_fn=None):
+    """Called on startup to pick up unprocessed ORB hits from today."""
+    pending = db.get_pending_scan_hits(date.today(), "orb")
+    if not pending:
+        log.info("No pending scan hits to resume")
+        return
+
+    log.info("Found %d pending scan hits from today, resuming pipeline", len(pending))
+    if bot_send_fn:
+        symbols = [h["symbol"] for h in pending]
+        await bot_send_fn(
+            f"Resuming {len(pending)} pending ORB hits from earlier: {', '.join(symbols[:10])}"
+        )
+
+    steps = {}
+    await _process_pending_orb_hits(steps, bot_send_fn, send_trade_fn)
+
+
+async def _process_hit(hit: dict, steps: dict, send_trade_fn=None,
+                       market_ctx: dict | None = None, hit_id: int | None = None):
     """Run the full pipeline for a single ORB hit: earnings check -> entry -> exit -> timemachine -> budget -> risk."""
     symbol = hit["symbol"]
     log.info("Processing hit: %s", symbol)
@@ -181,6 +236,8 @@ async def _process_hit(hit: dict, steps: dict, send_trade_fn=None, market_ctx: d
     if earnings_warning and "EARNINGS TODAY" in earnings_warning:
         log.info("%s: skipping -- %s", symbol, earnings_warning)
         steps[f"earnings_{symbol}"] = {"skipped": True, "reason": earnings_warning}
+        if hit_id:
+            db.update_scan_hit(hit_id, "skipped", earnings_warning)
         return
 
     # Entry check with volume confirmation (trigger bar must have >= 1x range avg volume)
@@ -192,6 +249,7 @@ async def _process_hit(hit: dict, steps: dict, send_trade_fn=None, market_ctx: d
     entry = read_trader_json("entry.json")
     if not entry or entry.get("status") != "triggered":
         log.info("%s: not triggered, skipping", symbol)
+        # Don't mark as skipped — it may trigger on a later scan cycle
         return
 
     # Exit plan
@@ -200,6 +258,8 @@ async def _process_hit(hit: dict, steps: dict, send_trade_fn=None, market_ctx: d
 
     plan = read_trader_json("plan.json")
     if not plan:
+        if hit_id:
+            db.update_scan_hit(hit_id, "skipped", "no exit plan")
         return
 
     # Time Machine simulation
@@ -208,9 +268,15 @@ async def _process_hit(hit: dict, steps: dict, send_trade_fn=None, market_ctx: d
 
     tm = read_trader_json("timemachine.json")
 
+    # Check if this symbol also appeared in today's premarket daily scan
+    daily_setups = db.get_daily_setups_for_symbol(symbol)
+    if daily_setups:
+        log.info("%s has daily setups: %s", symbol, daily_setups)
+
     # AI-enhanced technical reasoning (runs in parallel with sizing conceptually)
     ai_reasoning = generate_technical_reasoning(
         plan, tm, None, market_ctx=market_ctx, earnings_warning=earnings_warning,
+        daily_setups=daily_setups,
     )
     if ai_reasoning:
         log.info("%s AI reasoning: %s", symbol, ai_reasoning[:200])
@@ -224,6 +290,8 @@ async def _process_hit(hit: dict, steps: dict, send_trade_fn=None, market_ctx: d
 
     orders = read_trader_json("orders.json")
     if not orders or not orders.get("orders"):
+        if hit_id:
+            db.update_scan_hit(hit_id, "skipped", "budget sizer rejected")
         return
 
     # Risk check
@@ -232,6 +300,8 @@ async def _process_hit(hit: dict, steps: dict, send_trade_fn=None, market_ctx: d
 
     risk = read_trader_json("state/risk.json")
     if not risk or not risk.get("results"):
+        if hit_id:
+            db.update_scan_hit(hit_id, "skipped", "risk check failed")
         return
 
     # Process each order
@@ -247,6 +317,8 @@ async def _process_hit(hit: dict, steps: dict, send_trade_fn=None, market_ctx: d
             order_data["market_context"] = market_ctx
         if earnings_warning:
             order_data["earnings_warning"] = earnings_warning
+        if daily_setups:
+            order_data["daily_setups"] = daily_setups
 
         # Extract Monte Carlo results
         mc_target = mc_stop = mc_neither = None
@@ -285,9 +357,13 @@ async def _process_hit(hit: dict, steps: dict, send_trade_fn=None, market_ctx: d
 
         if result["verdict"] == "PASS" and send_trade_fn:
             await send_trade_fn(trade_id, order_data, plan, tm, result)
+            if hit_id:
+                db.update_scan_hit(hit_id, "processed")
         elif result["verdict"] == "BLOCK":
             db.update_trade(trade_id, status="blocked", decision="blocked")
             log.info("%s: BLOCKED — %s", symbol, result.get("reasons"))
+            if hit_id:
+                db.update_scan_hit(hit_id, "skipped", f"BLOCKED: {result.get('reasons')}")
 
 
 async def flatten_check(bot_send_fn=None, send_trade_fn=None):
