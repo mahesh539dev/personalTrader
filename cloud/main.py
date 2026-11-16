@@ -15,7 +15,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from cloud import config, db
 from cloud.orchestrator import (
     premarket_scan, orb_scan, flatten_check, forced_flatten,
-    sync_fills, end_of_day,
+    sync_fills, end_of_day, resume_pending_hits,
 )
 from cloud.telegram_bot import TradingBot
 
@@ -213,6 +213,9 @@ async def main():
 
     scheduler.start()
     log.info("Scheduler started with %d jobs", len(scheduler.get_jobs()))
+
+    # Resume any pending scan hits from earlier today (survives redeploys)
+    await resume_pending_hits(bot_send_fn=_send, send_trade_fn=_send_trade)
 
     # Send startup notification with health check results
     health_lines = "\n".join(f"  {r}" for r in health_results)

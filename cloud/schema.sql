@@ -96,9 +96,24 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
     error       TEXT
 );
 
+CREATE TABLE IF NOT EXISTS scan_hits (
+    id          SERIAL PRIMARY KEY,
+    date        DATE NOT NULL,
+    symbol      TEXT NOT NULL,
+    scan_type   TEXT NOT NULL DEFAULT 'orb',
+    scan_time   TEXT,
+    hit_data    JSONB,
+    status      TEXT NOT NULL DEFAULT 'pending',
+    skip_reason TEXT,
+    processed_at TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_trades_date ON trades(date);
 CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol);
 CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
 CREATE INDEX IF NOT EXISTS idx_trades_setup ON trades(setup);
 CREATE INDEX IF NOT EXISTS idx_trade_pairs_date ON trade_pairs(date);
 CREATE INDEX IF NOT EXISTS idx_daily_snapshots_date ON daily_snapshots(date);
+CREATE INDEX IF NOT EXISTS idx_scan_hits_date_status ON scan_hits(date, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_scan_hits_date_symbol ON scan_hits(date, symbol, scan_type);
