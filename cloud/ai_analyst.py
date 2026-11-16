@@ -53,7 +53,10 @@ def _ask(prompt: str, max_tokens: int = 500) -> str | None:
                 max_tokens=max_tokens,
                 messages=[{"role": "user", "content": prompt}],
             )
-            return response.content[0].text
+            for block in response.content:
+                if getattr(block, "type", None) == "text":
+                    return block.text
+            return None
 
         elif provider == "openai":
             response = client.chat.completions.create(
