@@ -85,6 +85,16 @@ async def premarket_scan(bot_send_fn=None):
         db.insert_scan("daily", date.today(), hit_count, symbols[:50],
                        steps["daily"].get("duration_ms"), r.stdout[:2000])
 
+        # Persist each daily hit to scan_hits for ORB cross-referencing
+        for h in watchlist["hits"]:
+            hit_id = db.upsert_scan_hit(
+                scan_date=date.today(),
+                symbol=h["symbol"],
+                scan_type="daily",
+                hit_data={"setups": h.get("setups", [])},
+            )
+            db.update_scan_hit(hit_id, status="processed")
+
         # News check on top hits
         top_tickers = ",".join(symbols[:10])
         r = run_tool("trader-news/news.py", ["--tickers", top_tickers, "--hours", "12"])
@@ -258,9 +268,15 @@ async def _process_hit(hit: dict, steps: dict, send_trade_fn=None,
 
     tm = read_trader_json("timemachine.json")
 
+    # Check if this symbol also appeared in today's premarket daily scan
+    daily_setups = db.get_daily_setups_for_symbol(symbol)
+    if daily_setups:
+        log.info("%s has daily setups: %s", symbol, daily_setups)
+
     # AI-enhanced technical reasoning (runs in parallel with sizing conceptually)
     ai_reasoning = generate_technical_reasoning(
         plan, tm, None, market_ctx=market_ctx, earnings_warning=earnings_warning,
+        daily_setups=daily_setups,
     )
     if ai_reasoning:
         log.info("%s AI reasoning: %s", symbol, ai_reasoning[:200])
@@ -301,6 +317,8 @@ async def _process_hit(hit: dict, steps: dict, send_trade_fn=None,
             order_data["market_context"] = market_ctx
         if earnings_warning:
             order_data["earnings_warning"] = earnings_warning
+        if daily_setups:
+            order_data["daily_setups"] = daily_setups
 
         # Extract Monte Carlo results
         mc_target = mc_stop = mc_neither = None

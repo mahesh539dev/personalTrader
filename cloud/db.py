@@ -248,6 +248,23 @@ def get_pending_scan_hits(scan_date: date | None = None,
     )
 
 
+def get_daily_setups_for_symbol(symbol: str, scan_date: date | None = None) -> list[str]:
+    """Return the daily setup names for a symbol from today's premarket scan."""
+    scan_date = scan_date or date.today()
+    row = fetch_one(
+        """SELECT hit_data FROM scan_hits
+        WHERE date = %s AND symbol = %s AND scan_type = 'daily'""",
+        (scan_date, symbol),
+    )
+    if not row or not row.get("hit_data"):
+        return []
+    import json
+    data = row["hit_data"]
+    if isinstance(data, str):
+        data = json.loads(data)
+    return data.get("setups", [])
+
+
 def update_scan_hit(hit_id: int, status: str, skip_reason: str | None = None) -> None:
     execute(
         """UPDATE scan_hits SET status = %s, skip_reason = %s, processed_at = NOW()
