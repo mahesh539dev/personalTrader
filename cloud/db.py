@@ -331,8 +331,34 @@ def trade_stats(days: int = 30) -> dict:
     return row or {}
 
 
+_leader_conn = None
+
+def try_acquire_leader_lock() -> bool:
+    """Try to acquire an advisory lock (non-blocking).
+
+    Returns True if this process is the leader. The lock is held for the
+    lifetime of the connection and released automatically on disconnect.
+    Only one worker should run the Telegram bot + scheduler.
+    """
+    global _leader_conn
+    _leader_conn = _pool.getconn()
+    with _leader_conn.cursor() as cur:
+        cur.execute("SELECT pg_try_advisory_lock(1)")
+        acquired = cur.fetchone()[0]
+    if not acquired:
+        _pool.putconn(_leader_conn)
+        _leader_conn = None
+    return acquired
+
+
 def shutdown():
-    global _pool
+    global _pool, _leader_conn
+    if _leader_conn:
+        try:
+            _pool.putconn(_leader_conn)
+        except Exception:
+            pass
+        _leader_conn = None
     if _pool:
         _pool.closeall()
         _pool = None

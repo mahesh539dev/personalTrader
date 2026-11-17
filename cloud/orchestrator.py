@@ -244,8 +244,6 @@ async def resume_premarket_if_missed(bot_send_fn=None):
         return
 
     log.info("No premarket data for today — running premarket scan now")
-    if bot_send_fn:
-        await bot_send_fn("Premarket scan missed (redeploy?) — running now...")
     await premarket_scan(bot_send_fn=bot_send_fn)
 
 
