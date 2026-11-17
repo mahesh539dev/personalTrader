@@ -225,6 +225,29 @@ async def resume_pending_hits(bot_send_fn=None, send_trade_fn=None):
     await _process_pending_orb_hits(steps, bot_send_fn, send_trade_fn)
 
 
+async def resume_premarket_if_missed(bot_send_fn=None):
+    """Run the premarket scan on startup if it hasn't run today yet.
+
+    Handles mid-day redeploys between 6:00 AM and market open — the
+    scheduler's 6 AM job will have been missed, so we run it now to
+    populate the daily scan hits that ORB cross-references later.
+    """
+    if db.has_daily_scan_today():
+        log.info("Premarket scan already ran today, skipping")
+        return
+
+    # Only run if we're in the window where it makes sense (after 6 AM ET on a weekday)
+    now_et = datetime.now()
+    if now_et.weekday() >= 5:
+        log.info("Weekend — skipping premarket scan")
+        return
+
+    log.info("No premarket data for today — running premarket scan now")
+    if bot_send_fn:
+        await bot_send_fn("Premarket scan missed (redeploy?) — running now...")
+    await premarket_scan(bot_send_fn=bot_send_fn)
+
+
 async def _process_hit(hit: dict, steps: dict, send_trade_fn=None,
                        market_ctx: dict | None = None, hit_id: int | None = None):
     """Run the full pipeline for a single ORB hit: earnings check -> entry -> exit -> timemachine -> budget -> risk."""

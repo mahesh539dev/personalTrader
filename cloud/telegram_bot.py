@@ -16,6 +16,18 @@ from cloud.alpaca_client import AlpacaClient, AlpacaError
 
 log = logging.getLogger(__name__)
 
+
+class _Conflict409Filter(logging.Filter):
+    """Drop the repetitive 409 Conflict tracebacks from the Telegram updater."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.exc_info and record.exc_info[1]:
+            msg = str(record.exc_info[1])
+            if "terminated by other getUpdates request" in msg:
+                return False
+        return True
+
+
 APPROVE_PREFIX = "approve:"
 DECLINE_PREFIX = "decline:"
 
@@ -158,6 +170,15 @@ class TradingBot:
 
         await self.app.initialize()
         await self.app.start()
+
+        # Clear any stale webhook/polling session before we start ours
+        await self.bot.delete_webhook(drop_pending_updates=True)
+
+        # Suppress the noisy 409 Conflict tracebacks — they auto-recover
+        # and flood logs when a previous deploy's session hasn't timed out
+        _updater_log = logging.getLogger("telegram.ext.Updater")
+        _updater_log.addFilter(_Conflict409Filter())
+
         await self.app.updater.start_polling(drop_pending_updates=True)
         log.info("Telegram bot started (polling)")
 

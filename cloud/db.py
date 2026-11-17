@@ -265,6 +265,16 @@ def get_daily_setups_for_symbol(symbol: str, scan_date: date | None = None) -> l
     return data.get("setups", [])
 
 
+def has_daily_scan_today(scan_date: date | None = None) -> bool:
+    """Return True if any daily scan hits exist for the given date."""
+    scan_date = scan_date or date.today()
+    row = fetch_one(
+        "SELECT 1 FROM scan_hits WHERE date = %s AND scan_type = 'daily' LIMIT 1",
+        (scan_date,),
+    )
+    return row is not None
+
+
 def update_scan_hit(hit_id: int, status: str, skip_reason: str | None = None) -> None:
     execute(
         """UPDATE scan_hits SET status = %s, skip_reason = %s, processed_at = NOW()
