@@ -136,14 +136,6 @@ async def main():
     db.init()
     log.info("Database ready")
 
-    # Only one worker instance should run at a time (prevents duplicate
-    # Telegram bots, duplicate messages, and 409 Conflicts during deploys)
-    if not db.try_acquire_leader_lock():
-        log.warning("Another worker already running (advisory lock held). Exiting.")
-        db.shutdown()
-        sys.exit(0)
-    log.info("Leader lock acquired — this is the active worker")
-
     # Run startup health checks on all API connections
     log.info("Running startup connection checks...")
     health_results = _check_connections()
