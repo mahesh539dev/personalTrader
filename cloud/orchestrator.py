@@ -61,8 +61,9 @@ async def premarket_scan(bot_send_fn=None):
     run_id = db.start_pipeline_run("premarket")
     steps = {}
     try:
-        # Refresh universe on Mondays
-        if date.today().weekday() == 0:
+        # Refresh universe on Mondays or if universe.txt is missing
+        universe_path = os.path.join(TRADER_DIR, "universe.txt")
+        if date.today().weekday() == 0 or not os.path.exists(universe_path):
             r = run_tool("trader-scanner/scan.py", ["universe"])
             steps["universe"] = {"exit_code": r.returncode, "duration_ms": 0}
 

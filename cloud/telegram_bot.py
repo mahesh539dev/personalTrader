@@ -18,13 +18,16 @@ log = logging.getLogger(__name__)
 
 
 class _Conflict409Filter(logging.Filter):
-    """Drop the repetitive 409 Conflict tracebacks from the Telegram updater."""
+    """Drop the repetitive 409 Conflict tracebacks and httpx 409 lines."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         if record.exc_info and record.exc_info[1]:
             msg = str(record.exc_info[1])
             if "terminated by other getUpdates request" in msg:
                 return False
+        msg = record.getMessage()
+        if "getUpdates" in msg and "409" in msg:
+            return False
         return True
 
 
@@ -174,10 +177,11 @@ class TradingBot:
         # Clear any stale webhook/polling session before we start ours
         await self.bot.delete_webhook(drop_pending_updates=True)
 
-        # Suppress the noisy 409 Conflict tracebacks — they auto-recover
-        # and flood logs when a previous deploy's session hasn't timed out
-        _updater_log = logging.getLogger("telegram.ext.Updater")
-        _updater_log.addFilter(_Conflict409Filter())
+        # Suppress the noisy 409 Conflict tracebacks and httpx lines —
+        # they auto-recover and flood logs during/after deploys
+        _conflict_filter = _Conflict409Filter()
+        logging.getLogger("telegram.ext.Updater").addFilter(_conflict_filter)
+        logging.getLogger("httpx").addFilter(_conflict_filter)
 
         await self.app.updater.start_polling(drop_pending_updates=True)
         log.info("Telegram bot started (polling)")
