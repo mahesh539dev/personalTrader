@@ -58,6 +58,10 @@ def _today_str() -> str:
 
 async def premarket_scan(bot_send_fn=None):
     """06:00 ET — Pre-market scan: universe refresh (Mon), daily scan, news."""
+    if db.has_daily_scan_today():
+        log.info("Premarket scan already ran today, skipping")
+        return
+
     run_id = db.start_pipeline_run("premarket")
     steps = {}
     try:
