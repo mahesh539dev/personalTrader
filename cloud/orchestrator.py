@@ -151,14 +151,21 @@ async def orb_scan(bot_send_fn=None, send_trade_fn=None):
         r = run_tool("trader-scanner/scan.py", ["orb", "--at", at_time], timeout=600)
         steps["orb"] = {"exit_code": r.returncode}
 
-        if r.returncode != 0:
-            db.finish_pipeline_run(run_id, "completed", steps)
+        # exit code 1 = no hits found (normal), anything else = real error
+        if r.returncode not in (0, 1):
+            log.warning("ORB scan at %s failed (exit %d)", at_time, r.returncode)
+            db.finish_pipeline_run(run_id, "failed", steps)
             return
 
         watchlist = read_trader_json("watchlist.json")
-        if not watchlist or not watchlist.get("hits"):
+        hits = watchlist.get("hits", []) if watchlist else []
+        if not hits:
+            log.info("ORB scan at %s: no breakouts found", at_time)
             db.finish_pipeline_run(run_id, "completed", steps)
             return
+
+        log.info("ORB scan at %s: %d hits — %s", at_time, len(hits),
+                 ", ".join(h["symbol"] for h in hits[:10]))
 
         symbols = [h["symbol"] for h in watchlist["hits"]]
         db.insert_scan("orb", date.today(), len(symbols), symbols[:50],
