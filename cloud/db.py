@@ -229,7 +229,8 @@ def upsert_scan_hit(scan_date: date, symbol: str, scan_type: str = "orb",
         """INSERT INTO scan_hits (date, symbol, scan_type, scan_time, hit_data)
         VALUES (%s, %s, %s, %s, %s)
         ON CONFLICT (date, symbol, scan_type) DO UPDATE SET
-            scan_time = EXCLUDED.scan_time, hit_data = EXCLUDED.hit_data
+            scan_time = EXCLUDED.scan_time, hit_data = EXCLUDED.hit_data,
+            status = 'pending'
         RETURNING id""",
         (scan_date, symbol, scan_type, scan_time,
          json.dumps(hit_data) if hit_data else None),
