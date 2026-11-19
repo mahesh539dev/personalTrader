@@ -281,19 +281,25 @@ async def _process_hit(hit: dict, steps: dict, send_trade_fn=None,
 
     entry = read_trader_json("entry.json")
     if not entry or entry.get("status") != "triggered":
-        log.info("%s: not triggered, skipping", symbol)
+        status = entry.get("status", "unknown") if entry else "no data"
+        reason = entry.get("reason", "") if entry else ""
+        log.info("%s: entry status=%s (%s), skipping", symbol, status, reason)
         # Don't mark as skipped — it may trigger on a later scan cycle
         return
 
     # Exit plan
-    r = run_tool("trader-exit/exit.py", ["plan", "--stop", "or-mid", "--target", "1R", "--write"])
+    r = run_tool("trader-exit/exit.py", ["plan", "--stop", "or-mid", "--target", "2R", "--write"])
     steps[f"exit_{symbol}"] = {"exit_code": r.returncode}
 
     plan = read_trader_json("plan.json")
     if not plan:
+        log.warning("%s: exit plan failed (no plan.json)", symbol)
         if hit_id:
             db.update_scan_hit(hit_id, "skipped", "no exit plan")
         return
+    log.info("%s: plan entry=%.2f stop=%.2f target=%.2f R:R=%.2f",
+             symbol, plan.get("entry", 0), plan.get("stop", 0),
+             plan.get("target", 0), plan.get("reward_risk", 0))
 
     # Time Machine simulation
     r = run_tool("trader-timemachine/timemachine.py", ["run", "--write"])
@@ -323,6 +329,8 @@ async def _process_hit(hit: dict, steps: dict, send_trade_fn=None,
 
     orders = read_trader_json("orders.json")
     if not orders or not orders.get("orders"):
+        log.info("%s: sizer produced no orders (exit %d): %s",
+                 symbol, r.returncode, r.stderr[:300] if r.stderr else r.stdout[:300])
         if hit_id:
             db.update_scan_hit(hit_id, "skipped", "budget sizer rejected")
         return

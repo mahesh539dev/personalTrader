@@ -214,13 +214,7 @@ async def main():
     scheduler.start()
     log.info("Scheduler started with %d jobs", len(scheduler.get_jobs()))
 
-    # If premarket scan was missed (deploy after 6 AM), run it now
-    await resume_premarket_if_missed(bot_send_fn=_send)
-
-    # Resume any pending scan hits from earlier today (survives redeploys)
-    await resume_pending_hits(bot_send_fn=_send, send_trade_fn=_send_trade)
-
-    # Send startup notification with health check results
+    # Send startup notification immediately (before blocking scans)
     health_lines = "\n".join(f"  {r}" for r in health_results)
     await bot.send_message(
         f"Trading bot started.\n"
@@ -229,6 +223,12 @@ async def main():
         f"Jobs: {len(scheduler.get_jobs())}\n\n"
         f"Connection checks:\n{health_lines}"
     )
+
+    # If premarket scan was missed (deploy after 6 AM), run it now
+    await resume_premarket_if_missed(bot_send_fn=_send)
+
+    # Resume any pending scan hits from earlier today (survives redeploys)
+    await resume_pending_hits(bot_send_fn=_send, send_trade_fn=_send_trade)
 
     # Keep running until shutdown signal
     stop_event = asyncio.Event()
