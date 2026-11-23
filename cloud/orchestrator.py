@@ -244,14 +244,26 @@ async def resume_premarket_if_missed(bot_send_fn=None):
     scheduler's 6 AM job will have been missed, so we run it now to
     populate the daily scan hits that ORB cross-references later.
     """
-    if db.has_daily_scan_today():
-        log.info("Premarket scan already ran today, skipping")
+    has_daily = db.has_daily_scan_today()
+    daily_count = db.count_scan_hits_today("daily")
+    log.info("Premarket check: has_daily=%s, daily_count=%d", has_daily, daily_count)
+
+    if has_daily:
+        log.info("Premarket scan already ran today (%d hits), skipping", daily_count)
         return
 
-    # Only run if we're in the window where it makes sense (after 6 AM ET on a weekday)
     now_et = datetime.now()
     if now_et.weekday() >= 5:
         log.info("Weekend — skipping premarket scan")
+        return
+
+    # Don't re-run during ORB hours — it blocks the event loop for minutes
+    # and eats the ORB scan window. ORB scans work without premarket data.
+    hour, minute = now_et.hour, now_et.minute
+    if hour > 9 or (hour == 9 and minute >= 45):
+        log.info("Past 9:45 AM — skipping premarket scan to preserve ORB window")
+        if bot_send_fn:
+            await bot_send_fn("Skipped premarket scan (deployed after 9:45 AM). ORB scans will run without it.")
         return
 
     log.info("No premarket data for today — running premarket scan now")

@@ -276,6 +276,15 @@ def has_daily_scan_today(scan_date: date | None = None) -> bool:
     return row is not None
 
 
+def count_scan_hits_today(scan_type: str = "orb", scan_date: date | None = None) -> int:
+    scan_date = scan_date or date.today()
+    row = fetch_one(
+        "SELECT COUNT(*) as cnt FROM scan_hits WHERE date = %s AND scan_type = %s",
+        (scan_date, scan_type),
+    )
+    return row["cnt"] if row else 0
+
+
 def update_scan_hit(hit_id: int, status: str, skip_reason: str | None = None) -> None:
     execute(
         """UPDATE scan_hits SET status = %s, skip_reason = %s, processed_at = NOW()
