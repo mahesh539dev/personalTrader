@@ -180,6 +180,10 @@ async def orb_scan(bot_send_fn=None, send_trade_fn=None):
                 hit_data=h,
             )
 
+        # Verify hits were persisted
+        persisted = db.count_scan_hits_today("orb")
+        log.info("Upserted %d hits, DB now has %d ORB hits for today", len(hits), persisted)
+
         # Process pending hits (includes ones from earlier scans today)
         await _process_pending_orb_hits(steps, bot_send_fn, send_trade_fn)
 
@@ -203,11 +207,11 @@ async def _process_pending_orb_hits(steps: dict, bot_send_fn=None, send_trade_fn
     pending = db.get_pending_scan_hits(date.today(), "orb")
     new_hits = [h for h in pending if h["symbol"] not in already_proposed]
 
+    log.info("ORB pipeline: %d pending, %d already proposed, %d new to process",
+             len(pending), len(already_proposed), len(new_hits))
+
     if not new_hits:
         return
-
-    log.info("Processing %d pending ORB hits (of %d pending, %d already proposed)",
-             len(new_hits), len(pending), len(already_proposed))
     for hit_row in new_hits[:3]:
         hit_data = hit_row.get("hit_data") or {"symbol": hit_row["symbol"]}
         if isinstance(hit_data, str):
