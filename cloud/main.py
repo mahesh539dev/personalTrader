@@ -164,7 +164,7 @@ async def main():
         misfire_grace_time=300,
     )
 
-    # ORB scan loop: weekdays every 5 min from 9:50 to 10:30 AM ET
+    # ORB scan loop: weekdays every 5 min from 9:50 AM to 12:00 PM ET
     for minute in range(50, 60, 5):
         scheduler.add_job(
             orb_scan, CronTrigger(day_of_week="mon-fri", hour=9, minute=minute),
@@ -172,13 +172,14 @@ async def main():
             id=f"orb_9_{minute}", name=f"ORB scan 9:{minute:02d}",
             misfire_grace_time=120,
         )
-    for minute in range(0, 35, 5):
-        scheduler.add_job(
-            orb_scan, CronTrigger(day_of_week="mon-fri", hour=10, minute=minute),
-            kwargs={"bot_send_fn": _send, "send_trade_fn": _send_trade},
-            id=f"orb_10_{minute}", name=f"ORB scan 10:{minute:02d}",
-            misfire_grace_time=120,
-        )
+    for hour in range(10, 12):
+        for minute in range(0, 60, 5):
+            scheduler.add_job(
+                orb_scan, CronTrigger(day_of_week="mon-fri", hour=hour, minute=minute),
+                kwargs={"bot_send_fn": _send, "send_trade_fn": _send_trade},
+                id=f"orb_{hour}_{minute}", name=f"ORB scan {hour}:{minute:02d}",
+                misfire_grace_time=120,
+            )
 
     # Fill tracker: every 60 seconds during market hours (9:30-16:00 ET, weekdays)
     scheduler.add_job(
