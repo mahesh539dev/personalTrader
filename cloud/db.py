@@ -66,6 +66,7 @@ def fetch_one(query: str, params: tuple = None) -> dict | None:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(query, params)
             row = cur.fetchone()
+        conn.commit()
     return dict(row) if row else None
 
 
@@ -74,6 +75,7 @@ def fetch_all(query: str, params: tuple = None) -> list[dict]:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(query, params)
             rows = cur.fetchall()
+        conn.commit()
     return [dict(r) for r in rows]
 
 
