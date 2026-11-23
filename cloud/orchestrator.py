@@ -210,6 +210,15 @@ async def _process_pending_orb_hits(steps: dict, bot_send_fn=None, send_trade_fn
     log.info("ORB pipeline: %d pending, %d already proposed, %d new to process",
              len(pending), len(already_proposed), len(new_hits))
 
+    if bot_send_fn:
+        if not pending:
+            await bot_send_fn(f"ORB pipeline: 0 pending hits in DB (commits may not be persisting)")
+        elif not new_hits:
+            await bot_send_fn(f"ORB pipeline: {len(pending)} pending, all {len(already_proposed)} already proposed")
+        else:
+            syms = ", ".join(h["symbol"] for h in new_hits[:5])
+            await bot_send_fn(f"ORB pipeline: processing {len(new_hits)} hits — {syms}")
+
     if not new_hits:
         return
     for hit_row in new_hits[:3]:
@@ -220,6 +229,7 @@ async def _process_pending_orb_hits(steps: dict, bot_send_fn=None, send_trade_fn
         await _process_hit(
             hit_data, steps, send_trade_fn,
             market_ctx=market_ctx, hit_id=hit_row["id"],
+            bot_send_fn=bot_send_fn,
         )
 
 
@@ -275,7 +285,8 @@ async def resume_premarket_if_missed(bot_send_fn=None):
 
 
 async def _process_hit(hit: dict, steps: dict, send_trade_fn=None,
-                       market_ctx: dict | None = None, hit_id: int | None = None):
+                       market_ctx: dict | None = None, hit_id: int | None = None,
+                       bot_send_fn=None):
     """Run the full pipeline for a single ORB hit: earnings check -> entry -> exit -> timemachine -> budget -> risk."""
     symbol = hit["symbol"]
     log.info("Processing hit: %s", symbol)
@@ -287,6 +298,8 @@ async def _process_hit(hit: dict, steps: dict, send_trade_fn=None,
         steps[f"earnings_{symbol}"] = {"skipped": True, "reason": earnings_warning}
         if hit_id:
             db.update_scan_hit(hit_id, "skipped", earnings_warning)
+        if bot_send_fn:
+            await bot_send_fn(f"{symbol}: SKIP — {earnings_warning}")
         return
 
     # Entry check with volume confirmation (trigger bar must have >= 1x range avg volume)
@@ -300,8 +313,13 @@ async def _process_hit(hit: dict, steps: dict, send_trade_fn=None,
         status = entry.get("status", "unknown") if entry else "no data"
         reason = entry.get("reason", "") if entry else ""
         log.info("%s: entry status=%s (%s), skipping", symbol, status, reason)
+        if bot_send_fn:
+            await bot_send_fn(f"{symbol}: entry not triggered — {status} ({reason})")
         # Don't mark as skipped — it may trigger on a later scan cycle
         return
+
+    if bot_send_fn:
+        await bot_send_fn(f"{symbol}: entry TRIGGERED, building exit plan...")
 
     # Exit plan
     r = run_tool("trader-exit/exit.py", ["plan", "--stop", "or-mid", "--target", "2R", "--write"])
@@ -312,6 +330,8 @@ async def _process_hit(hit: dict, steps: dict, send_trade_fn=None,
         log.warning("%s: exit plan failed (no plan.json)", symbol)
         if hit_id:
             db.update_scan_hit(hit_id, "skipped", "no exit plan")
+        if bot_send_fn:
+            await bot_send_fn(f"{symbol}: SKIP — exit plan failed")
         return
     log.info("%s: plan entry=%.2f stop=%.2f target=%.2f R:R=%.2f",
              symbol, plan.get("entry", 0), plan.get("stop", 0),
@@ -341,6 +361,8 @@ async def _process_hit(hit: dict, steps: dict, send_trade_fn=None,
                  symbol, r.returncode, r.stderr[:300] if r.stderr else r.stdout[:300])
         if hit_id:
             db.update_scan_hit(hit_id, "skipped", "budget sizer rejected")
+        if bot_send_fn:
+            await bot_send_fn(f"{symbol}: SKIP — budget sizer rejected (R:R={plan.get('reward_risk', '?')})")
         return
 
     # Risk check
@@ -351,6 +373,8 @@ async def _process_hit(hit: dict, steps: dict, send_trade_fn=None,
     if not risk or not risk.get("results"):
         if hit_id:
             db.update_scan_hit(hit_id, "skipped", "risk check failed")
+        if bot_send_fn:
+            await bot_send_fn(f"{symbol}: SKIP — risk check failed")
         return
 
     # Process each order
