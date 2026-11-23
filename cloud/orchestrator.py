@@ -16,7 +16,6 @@ from cloud import config, db
 from cloud.ai_analyst import (
     check_earnings_calendar,
     daily_market_briefing,
-    generate_technical_reasoning,
     get_market_context,
 )
 from cloud.alpaca_client import AlpacaClient, AlpacaError
@@ -207,7 +206,8 @@ async def _process_pending_orb_hits(steps: dict, bot_send_fn=None, send_trade_fn
     if not new_hits:
         return
 
-    log.info("Processing %d pending ORB hits", len(new_hits))
+    log.info("Processing %d pending ORB hits (of %d pending, %d already proposed)",
+             len(new_hits), len(pending), len(already_proposed))
     for hit_row in new_hits[:3]:
         hit_data = hit_row.get("hit_data") or {"symbol": hit_row["symbol"]}
         if isinstance(hit_data, str):
@@ -312,14 +312,6 @@ async def _process_hit(hit: dict, steps: dict, send_trade_fn=None,
     if daily_setups:
         log.info("%s has daily setups: %s", symbol, daily_setups)
 
-    # AI-enhanced technical reasoning (runs in parallel with sizing conceptually)
-    ai_reasoning = generate_technical_reasoning(
-        plan, tm, None, market_ctx=market_ctx, earnings_warning=earnings_warning,
-        daily_setups=daily_setups,
-    )
-    if ai_reasoning:
-        log.info("%s AI reasoning: %s", symbol, ai_reasoning[:200])
-
     # Fresh quote for sizing
     run_tool("trader-alerts/alerts.py", ["quote", symbol, "--write"])
 
@@ -352,8 +344,6 @@ async def _process_hit(hit: dict, steps: dict, send_trade_fn=None,
             continue
 
         # Attach extra context to the order for the Telegram ticket
-        if ai_reasoning:
-            order_data["ai_reasoning"] = ai_reasoning
         if market_ctx:
             order_data["market_context"] = market_ctx
         if earnings_warning:
