@@ -8,9 +8,10 @@ import asyncio
 import json
 import logging
 import os
-import subprocess
+import subprocess  # for CompletedProcess type
 import time
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from cloud import config, db
 from cloud.ai_analyst import (
@@ -24,15 +25,38 @@ log = logging.getLogger(__name__)
 
 APP_DIR = config.APP_DIR
 TRADER_DIR = config.TRADER_DIR
+ET = ZoneInfo("America/New_York")
 
 
-def run_tool(script: str, args: list[str], timeout: int = 300) -> subprocess.CompletedProcess:
-    """Run a trader tool CLI script and return the result."""
+def _now_et() -> datetime:
+    """Current time in Eastern, always explicit."""
+    return datetime.now(ET)
+
+
+async def run_tool(script: str, args: list[str], timeout: int = 300) -> subprocess.CompletedProcess:
+    """Run a trader tool CLI script without blocking the event loop."""
     cmd = ["python3", script] + args
     log.info("Running: %s", " ".join(cmd))
     start = time.monotonic()
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=APP_DIR)
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=APP_DIR,
+    )
+    try:
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.communicate()
+        elapsed = int((time.monotonic() - start) * 1000)
+        log.warning("Tool %s TIMED OUT after %dms", script, elapsed)
+        result = subprocess.CompletedProcess(cmd, returncode=-1, stdout="", stderr="TIMEOUT")
+        return result
     elapsed = int((time.monotonic() - start) * 1000)
+    stdout_text = stdout_bytes.decode("utf-8", errors="replace")
+    stderr_text = stderr_bytes.decode("utf-8", errors="replace")
+    result = subprocess.CompletedProcess(cmd, returncode=proc.returncode, stdout=stdout_text, stderr=stderr_text)
     if result.returncode != 0:
         log.warning("Tool %s exited %d in %dms: %s", script, result.returncode, elapsed,
                      result.stderr[:500] if result.stderr else result.stdout[:500])
@@ -61,18 +85,22 @@ async def premarket_scan(bot_send_fn=None):
         log.info("Premarket scan already ran today, skipping")
         return
 
+    log.info("Starting premarket scan")
+    if bot_send_fn:
+        await bot_send_fn("Pre-market scan starting...")
+
     run_id = db.start_pipeline_run("premarket")
     steps = {}
     try:
         # Refresh universe on Mondays or if universe.txt is missing
         universe_path = os.path.join(TRADER_DIR, "universe.txt")
         if date.today().weekday() == 0 or not os.path.exists(universe_path):
-            r = run_tool("trader-scanner/scan.py", ["universe"])
+            r = await run_tool("trader-scanner/scan.py", ["universe"])
             steps["universe"] = {"exit_code": r.returncode, "duration_ms": 0}
 
         # Daily scan
         start = time.monotonic()
-        r = run_tool("trader-scanner/scan.py", ["daily"], timeout=600)
+        r = await run_tool("trader-scanner/scan.py", ["daily"], timeout=600)
         steps["daily"] = {"exit_code": r.returncode, "duration_ms": int((time.monotonic() - start) * 1000)}
 
         watchlist = read_trader_json("watchlist.json")
@@ -101,7 +129,7 @@ async def premarket_scan(bot_send_fn=None):
 
         # News check on top hits
         top_tickers = ",".join(symbols[:10])
-        r = run_tool("trader-news/news.py", ["--tickers", top_tickers, "--hours", "12"])
+        r = await run_tool("trader-news/news.py", ["--tickers", top_tickers, "--hours", "12"])
         steps["news"] = {"exit_code": r.returncode}
 
         # Build summary for Telegram
@@ -140,20 +168,27 @@ async def premarket_scan(bot_send_fn=None):
 
 
 async def orb_scan(bot_send_fn=None, send_trade_fn=None):
-    """09:50-10:30 ET — Opening-range breakout scan + full pipeline for hits."""
+    """09:50-12:00 ET — Opening-range breakout scan + full pipeline for hits."""
     run_id = db.start_pipeline_run("orb_scan")
     steps = {}
     try:
-        now_et = datetime.now()
+        now_et = _now_et()
         at_time = now_et.strftime("%H:%M")
 
-        r = run_tool("trader-scanner/scan.py", ["orb", "--at", at_time], timeout=600)
+        log.info("ORB scan starting at %s", at_time)
+        if bot_send_fn:
+            await bot_send_fn(f"ORB scan starting at {at_time}...")
+
+        r = await run_tool("trader-scanner/scan.py", ["orb", "--at", at_time], timeout=600)
         steps["orb"] = {"exit_code": r.returncode}
 
         # exit code 1 = no hits found (normal), anything else = real error
         if r.returncode not in (0, 1):
             log.warning("ORB scan at %s failed (exit %d)", at_time, r.returncode)
             db.finish_pipeline_run(run_id, "failed", steps)
+            if bot_send_fn:
+                err_snippet = (r.stderr[:200] if r.stderr else r.stdout[:200]).strip()
+                await bot_send_fn(f"ORB scan FAILED at {at_time} (exit {r.returncode}): {err_snippet}")
             return
 
         watchlist = read_trader_json("watchlist.json")
@@ -161,10 +196,14 @@ async def orb_scan(bot_send_fn=None, send_trade_fn=None):
         if not hits:
             log.info("ORB scan at %s: no breakouts found", at_time)
             db.finish_pipeline_run(run_id, "completed", steps)
+            if bot_send_fn:
+                await bot_send_fn(f"ORB scan at {at_time}: 0 breakouts found")
             return
 
-        log.info("ORB scan at %s: %d hits — %s", at_time, len(hits),
-                 ", ".join(h["symbol"] for h in hits[:10]))
+        hit_syms = ", ".join(h["symbol"] for h in hits[:10])
+        log.info("ORB scan at %s: %d hits — %s", at_time, len(hits), hit_syms)
+        if bot_send_fn:
+            await bot_send_fn(f"ORB scan at {at_time}: {len(hits)} breakouts — {hit_syms}")
 
         symbols = [h["symbol"] for h in watchlist["hits"]]
         db.insert_scan("orb", date.today(), len(symbols), symbols[:50],
@@ -266,7 +305,7 @@ async def resume_premarket_if_missed(bot_send_fn=None):
         log.info("Premarket scan already ran today (%d hits), skipping", daily_count)
         return
 
-    now_et = datetime.now()
+    now_et = _now_et()
     if now_et.weekday() >= 5:
         log.info("Weekend — skipping premarket scan")
         return
@@ -303,7 +342,7 @@ async def _process_hit(hit: dict, steps: dict, send_trade_fn=None,
         return
 
     # Entry check with volume confirmation (trigger bar must have >= 1x range avg volume)
-    r = run_tool("trader-entry/entry.py", [
+    r = await run_tool("trader-entry/entry.py", [
         "check", symbol, "--setup", "orb", "--min-volume-x", "1.0", "--write",
     ])
     steps[f"entry_{symbol}"] = {"exit_code": r.returncode}
@@ -322,7 +361,7 @@ async def _process_hit(hit: dict, steps: dict, send_trade_fn=None,
         await bot_send_fn(f"{symbol}: entry TRIGGERED, building exit plan...")
 
     # Exit plan
-    r = run_tool("trader-exit/exit.py", ["plan", "--stop", "or-mid", "--target", "2R", "--write"])
+    r = await run_tool("trader-exit/exit.py", ["plan", "--stop", "or-mid", "--target", "2R", "--write"])
     steps[f"exit_{symbol}"] = {"exit_code": r.returncode}
 
     plan = read_trader_json("plan.json")
@@ -338,7 +377,7 @@ async def _process_hit(hit: dict, steps: dict, send_trade_fn=None,
              plan.get("target", 0), plan.get("reward_risk", 0))
 
     # Time Machine simulation
-    r = run_tool("trader-timemachine/timemachine.py", ["run", "--write"])
+    r = await run_tool("trader-timemachine/timemachine.py", ["run", "--write"])
     steps[f"timemachine_{symbol}"] = {"exit_code": r.returncode}
 
     tm = read_trader_json("timemachine.json")
@@ -349,10 +388,10 @@ async def _process_hit(hit: dict, steps: dict, send_trade_fn=None,
         log.info("%s has daily setups: %s", symbol, daily_setups)
 
     # Fresh quote for sizing
-    run_tool("trader-alerts/alerts.py", ["quote", symbol, "--write"])
+    await run_tool("trader-alerts/alerts.py", ["quote", symbol, "--write"])
 
     # Position sizing
-    r = run_tool("trader-budget/size.py", ["--write"])
+    r = await run_tool("trader-budget/size.py", ["--write"])
     steps[f"budget_{symbol}"] = {"exit_code": r.returncode}
 
     orders = read_trader_json("orders.json")
@@ -366,7 +405,7 @@ async def _process_hit(hit: dict, steps: dict, send_trade_fn=None,
         return
 
     # Risk check
-    r = run_tool("trader-risk/check.py", [])
+    r = await run_tool("trader-risk/check.py", [])
     steps[f"risk_{symbol}"] = {"exit_code": r.returncode}
 
     risk = read_trader_json("state/risk.json")
@@ -454,11 +493,11 @@ async def flatten_check(bot_send_fn=None, send_trade_fn=None):
             if qty == 0:
                 continue
 
-            r = run_tool("trader-broker/ticket.py", [
+            r = await run_tool("trader-broker/ticket.py", [
                 "flatten", "--symbol", symbol, "--qty", str(qty)
             ])
 
-            r = run_tool("trader-risk/check.py", [])
+            r = await run_tool("trader-risk/check.py", [])
             risk = read_trader_json("state/risk.json")
 
             if risk and risk.get("results"):

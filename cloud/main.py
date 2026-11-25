@@ -213,15 +213,23 @@ async def main():
     )
 
     scheduler.start()
-    log.info("Scheduler started with %d jobs", len(scheduler.get_jobs()))
+    jobs = scheduler.get_jobs()
+    log.info("Scheduler started with %d jobs", len(jobs))
+    for j in jobs:
+        log.info("  Job: %s next=%s", j.name, j.next_run_time)
 
     # Send startup notification immediately (before blocking scans)
     health_lines = "\n".join(f"  {r}" for r in health_results)
+    job_names = [j.name for j in jobs if "ORB" not in j.name]
+    orb_count = sum(1 for j in jobs if "ORB" in j.name)
+    job_summary = ", ".join(job_names)
+    if orb_count:
+        job_summary += f", ORB scans x{orb_count}"
     await bot.send_message(
         f"Trading bot started.\n"
         f"Paper: {config.alpaca_paper()}\n"
         f"Budget: ${config.env_float('TRADING_BUDGET', 5000):,.0f}\n"
-        f"Jobs: {len(scheduler.get_jobs())}\n\n"
+        f"Jobs ({len(jobs)}): {job_summary}\n\n"
         f"Connection checks:\n{health_lines}"
     )
 
