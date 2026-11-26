@@ -311,6 +311,11 @@ async def close_stale_positions(bot_send_fn=None):
 
 async def resume_pending_hits(bot_send_fn=None, send_trade_fn=None):
     """Called on startup to pick up unprocessed ORB hits from today."""
+    now_et = _now_et()
+    if now_et.weekday() >= 5 or now_et.hour >= 16:
+        log.info("Market closed, skipping pending hit resume")
+        return
+
     pending = db.get_pending_scan_hits(date.today(), "orb")
     if not pending:
         log.info("No pending scan hits to resume")
@@ -391,7 +396,8 @@ async def _process_hit(hit: dict, steps: dict, send_trade_fn=None,
         log.info("%s: entry status=%s (%s), skipping", symbol, status, reason)
         if bot_send_fn:
             await bot_send_fn(f"{symbol}: entry not triggered — {status} ({reason})")
-        # Don't mark as skipped — it may trigger on a later scan cycle
+        if hit_id and status in ("expired", "no-data"):
+            db.update_scan_hit(hit_id, "skipped", f"entry {status}: {reason}")
         return
 
     if bot_send_fn:
