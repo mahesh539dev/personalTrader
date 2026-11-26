@@ -16,6 +16,7 @@ from cloud import config, db
 from cloud.orchestrator import (
     premarket_scan, orb_scan, flatten_check, forced_flatten,
     sync_fills, end_of_day, resume_pending_hits, resume_premarket_if_missed,
+    close_stale_positions,
 )
 from cloud.telegram_bot import TradingBot
 
@@ -232,6 +233,9 @@ async def main():
         f"Jobs ({len(jobs)}): {job_summary}\n\n"
         f"Connection checks:\n{health_lines}"
     )
+
+    # Close any positions left over from a previous day (failed flatten)
+    await close_stale_positions(bot_send_fn=_send)
 
     # If premarket scan was missed (deploy after 6 AM), run it now
     await resume_premarket_if_missed(bot_send_fn=_send)

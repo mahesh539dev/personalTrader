@@ -272,6 +272,43 @@ async def _process_pending_orb_hits(steps: dict, bot_send_fn=None, send_trade_fn
         )
 
 
+async def close_stale_positions(bot_send_fn=None):
+    """Close any positions left over from a previous day (e.g. failed flatten)."""
+    try:
+        alpaca = AlpacaClient()
+        positions = alpaca.get_positions()
+        if not positions:
+            return
+
+        for pos in positions:
+            symbol = pos["symbol"]
+            qty = abs(int(float(pos["qty"])))
+            if qty == 0:
+                continue
+
+            unrealized = float(pos.get("unrealized_pl", 0))
+            sign = "+" if unrealized >= 0 else ""
+            log.warning("Stale position found: %d %s (%s$%.2f) — closing", qty, symbol, sign, unrealized)
+            if bot_send_fn:
+                await bot_send_fn(
+                    f"Stale position from previous day: {qty} {symbol} ({sign}${unrealized:.2f})\n"
+                    f"Closing at market open..."
+                )
+
+            try:
+                result = alpaca.close_position(symbol)
+                log.info("Closed stale %s: %s", symbol, result.get("id", result))
+                if bot_send_fn:
+                    await bot_send_fn(f"Closed stale {symbol}: order {result.get('id', 'submitted')}")
+            except AlpacaError as e:
+                log.error("Failed to close stale %s: %s", symbol, e)
+                if bot_send_fn:
+                    await bot_send_fn(f"FAILED to close stale {symbol}: {e}\nManual action needed!")
+
+    except Exception as e:
+        log.exception("close_stale_positions failed")
+
+
 async def resume_pending_hits(bot_send_fn=None, send_trade_fn=None):
     """Called on startup to pick up unprocessed ORB hits from today."""
     pending = db.get_pending_scan_hits(date.today(), "orb")
@@ -546,33 +583,62 @@ async def forced_flatten(bot_send_fn=None):
             if qty == 0:
                 continue
 
-            side = "sell" if float(pos["qty"]) > 0 else "buy"
-            order = {
-                "symbol": symbol,
-                "side": side,
-                "qty": str(qty),
-                "type": "market",
-                "time_in_force": "day",
-            }
-
+            # Try close_position first — it cancels bracket legs and
+            # liquidates in one atomic API call, avoiding the race where
+            # shares are still held_for_orders after a manual cancel.
             try:
-                # Cancel any open bracket legs first
+                result = alpaca.close_position(symbol)
+                log.info("Force-flattened %s via close_position: %s", symbol, result.get("id", result))
+                if bot_send_fn:
+                    await bot_send_fn(f"Auto-flattened {qty} {symbol} at market (close_position)")
+                continue
+            except AlpacaError as e:
+                log.warning("close_position %s failed: %s — trying cancel+wait+sell", symbol, e)
+
+            # Fallback: cancel bracket legs, wait for shares to release, then sell
+            try:
                 open_orders = alpaca.get_orders(status="open")
+                cancelled = 0
                 for oo in open_orders:
                     if oo.get("symbol") == symbol:
-                        alpaca.cancel_order(oo["id"])
+                        try:
+                            alpaca.cancel_order(oo["id"])
+                            cancelled += 1
+                        except AlpacaError:
+                            pass
+                    for leg in oo.get("legs", []):
+                        if leg.get("symbol") == symbol and leg.get("status") in ("new", "accepted", "held"):
+                            try:
+                                alpaca.cancel_order(leg["id"])
+                                cancelled += 1
+                            except AlpacaError:
+                                pass
 
+                if cancelled > 0:
+                    log.info("Cancelled %d orders for %s, waiting for release", cancelled, symbol)
+                    await asyncio.sleep(3)
+
+                side = "sell" if float(pos["qty"]) > 0 else "buy"
+                order = {
+                    "symbol": symbol,
+                    "side": side,
+                    "qty": str(qty),
+                    "type": "market",
+                    "time_in_force": "day",
+                }
                 result = alpaca.place_order(order)
-                log.info("Force-flattened %s: %s", symbol, result.get("id"))
+                log.info("Force-flattened %s via manual sell: %s", symbol, result.get("id"))
                 if bot_send_fn:
-                    await bot_send_fn(f"Auto-flattened {qty} {symbol} at market (forced by flat-by time)")
+                    await bot_send_fn(f"Auto-flattened {qty} {symbol} at market (after cancelling {cancelled} bracket legs)")
             except AlpacaError as e:
-                log.error("Failed to flatten %s: %s", symbol, e)
+                log.error("Failed to flatten %s even after cancel+wait: %s", symbol, e)
                 if bot_send_fn:
-                    await bot_send_fn(f"FAILED to flatten {symbol}: {e}")
+                    await bot_send_fn(f"FAILED to flatten {symbol}: {e}\nManual action needed — check Alpaca dashboard!")
 
     except Exception as e:
         log.exception("Forced flatten failed")
+        if bot_send_fn:
+            await bot_send_fn(f"Forced flatten FAILED: {e}")
 
 
 async def sync_fills(bot_send_fn=None):
