@@ -16,9 +16,29 @@ from cloud import config, db
 from cloud.orchestrator import (
     premarket_scan, orb_scan, flatten_check, forced_flatten,
     sync_fills, end_of_day, resume_pending_hits, resume_premarket_if_missed,
-    close_stale_positions,
+    close_stale_positions, is_early_close,
 )
 from cloud.telegram_bot import TradingBot
+
+
+def _only_early(fn):
+    """Wrap an async job so it runs only on early-close days."""
+    async def wrapper(**kwargs):
+        if not is_early_close():
+            return
+        await fn(**kwargs)
+    wrapper.__name__ = fn.__name__ + "_early"
+    return wrapper
+
+
+def _skip_early(fn):
+    """Wrap an async job so it skips early-close days."""
+    async def wrapper(**kwargs):
+        if is_early_close():
+            return
+        await fn(**kwargs)
+    wrapper.__name__ = fn.__name__ + "_normal"
+    return wrapper
 
 logging.basicConfig(
     level=logging.INFO,
@@ -189,29 +209,56 @@ async def main():
         id="fill_tracker", name="Fill tracker",
     )
 
-    # Flatten check: weekdays at 15:50 ET
+    # Flatten check: 15:50 ET on normal days, 12:50 ET on early-close days
     scheduler.add_job(
-        flatten_check, CronTrigger(day_of_week="mon-fri", hour=15, minute=50),
+        _skip_early(flatten_check), CronTrigger(day_of_week="mon-fri", hour=15, minute=50),
         kwargs={"bot_send_fn": _send, "send_trade_fn": _send_trade},
         id="flatten", name="Flatten check",
         misfire_grace_time=120,
     )
-
-    # Forced flatten: weekdays at 15:55 ET
     scheduler.add_job(
-        forced_flatten, CronTrigger(day_of_week="mon-fri", hour=15, minute=55),
+        _only_early(flatten_check), CronTrigger(day_of_week="mon-fri", hour=12, minute=50),
+        kwargs={"bot_send_fn": _send, "send_trade_fn": _send_trade},
+        id="flatten_early", name="Flatten check (early close)",
+        misfire_grace_time=120,
+    )
+
+    # Forced flatten: 15:55 ET on normal days, 12:55 ET on early-close days
+    scheduler.add_job(
+        _skip_early(forced_flatten), CronTrigger(day_of_week="mon-fri", hour=15, minute=55),
         kwargs={"bot_send_fn": _send},
         id="forced_flatten", name="Forced flatten",
         misfire_grace_time=60,
     )
-
-    # End of day: weekdays at 16:05 ET
     scheduler.add_job(
-        end_of_day, CronTrigger(day_of_week="mon-fri", hour=16, minute=5),
+        _only_early(forced_flatten), CronTrigger(day_of_week="mon-fri", hour=12, minute=55),
+        kwargs={"bot_send_fn": _send},
+        id="forced_flatten_early", name="Forced flatten (early close)",
+        misfire_grace_time=60,
+    )
+
+    # End of day: 16:05 ET on normal days, 13:05 ET on early-close days
+    scheduler.add_job(
+        _skip_early(end_of_day), CronTrigger(day_of_week="mon-fri", hour=16, minute=5),
         kwargs={"bot_send_fn": _send},
         id="eod", name="End of day",
         misfire_grace_time=300,
     )
+    scheduler.add_job(
+        _only_early(end_of_day), CronTrigger(day_of_week="mon-fri", hour=13, minute=5),
+        kwargs={"bot_send_fn": _send},
+        id="eod_early", name="End of day (early close)",
+        misfire_grace_time=300,
+    )
+
+    # Safety net: close any remaining positions at 5 PM, 6 PM, and 9 AM ET
+    for hour, job_id in [(17, "safety_5pm"), (18, "safety_6pm"), (9, "safety_9am")]:
+        scheduler.add_job(
+            close_stale_positions, CronTrigger(day_of_week="mon-fri", hour=hour, minute=0),
+            kwargs={"bot_send_fn": _send},
+            id=job_id, name=f"Safety close ({hour}:00)",
+            misfire_grace_time=300,
+        )
 
     scheduler.start()
     jobs = scheduler.get_jobs()

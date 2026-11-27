@@ -27,6 +27,17 @@ APP_DIR = config.APP_DIR
 TRADER_DIR = config.TRADER_DIR
 ET = ZoneInfo("America/New_York")
 
+NYSE_EARLY_CLOSE = {
+    "2026-11-27": "day after Thanksgiving",
+    "2026-12-24": "Christmas Eve",
+    "2027-11-26": "day after Thanksgiving",
+}
+
+
+def is_early_close(d: date | None = None) -> bool:
+    """True if `d` is a 1:00 PM early-close day."""
+    return (d or date.today()).isoformat() in NYSE_EARLY_CLOSE
+
 
 def _now_et() -> datetime:
     """Current time in Eastern, always explicit."""
@@ -520,7 +531,7 @@ async def _process_hit(hit: dict, steps: dict, send_trade_fn=None,
 
 
 async def flatten_check(bot_send_fn=None, send_trade_fn=None):
-    """15:50 ET — Check for open positions and build flatten orders."""
+    """15:50 ET (12:50 on early-close days) — Close all open positions."""
     run_id = db.start_pipeline_run("flatten")
     try:
         alpaca = AlpacaClient()
@@ -536,39 +547,45 @@ async def flatten_check(bot_send_fn=None, send_trade_fn=None):
             if qty == 0:
                 continue
 
-            r = await run_tool("trader-broker/ticket.py", [
-                "flatten", "--symbol", symbol, "--qty", str(qty)
-            ])
+            unrealized = float(pos.get("unrealized_pl", 0))
+            entry_price = float(pos.get("avg_entry_price", 0))
+            sign = "+" if unrealized >= 0 else ""
 
-            r = await run_tool("trader-risk/check.py", [])
-            risk = read_trader_json("state/risk.json")
+            try:
+                result = alpaca.close_position(symbol)
+                order_id = result.get("id", "submitted")
+                log.info("Flatten closed %s (%d shares, %s$%.2f): order %s",
+                         symbol, qty, sign, unrealized, order_id)
 
-            if risk and risk.get("results"):
-                for result in risk["results"]:
-                    if result["verdict"] == "PASS" and send_trade_fn:
-                        orders = read_trader_json("orders.json")
-                        if orders and orders.get("orders"):
-                            order_data = orders["orders"][0]
-                            trade_id = db.insert_trade(
-                                trade_date=date.today(),
-                                symbol=symbol,
-                                side="sell",
-                                qty=qty,
-                                setup="flatten",
-                                entry_price=float(pos.get("avg_entry_price", 0)),
-                                stop_price=None,
-                                target_price=None,
-                                risk_per_share=None,
-                                max_loss=None,
-                                reward_risk=None,
-                                mc_target_pct=None, mc_stop_pct=None, mc_neither_pct=None,
-                                mc_history_wins=None, mc_history_total=None,
-                                risk_verdict="PASS",
-                                risk_reasons=[],
-                                fingerprint=result.get("fingerprint", ""),
-                                paper=config.alpaca_paper(),
-                            )
-                            await send_trade_fn(trade_id, order_data, None, None, result)
+                trade_id = db.insert_trade(
+                    trade_date=date.today(),
+                    symbol=symbol,
+                    side="sell",
+                    qty=qty,
+                    setup="flatten",
+                    entry_price=entry_price,
+                    stop_price=None,
+                    target_price=None,
+                    risk_per_share=None,
+                    max_loss=None,
+                    reward_risk=None,
+                    mc_target_pct=None, mc_stop_pct=None, mc_neither_pct=None,
+                    mc_history_wins=None, mc_history_total=None,
+                    risk_verdict="PASS",
+                    risk_reasons=[],
+                    fingerprint="",
+                    paper=config.alpaca_paper(),
+                )
+                db.update_trade(trade_id, status="submitted", broker_order_id=order_id)
+
+                if bot_send_fn:
+                    await bot_send_fn(
+                        f"Flatten: closing {qty} {symbol} ({sign}${unrealized:.2f}) — order {order_id}"
+                    )
+            except AlpacaError as e:
+                log.error("Flatten failed for %s: %s", symbol, e)
+                if bot_send_fn:
+                    await bot_send_fn(f"Flatten FAILED for {symbol}: {e}")
 
         db.finish_pipeline_run(run_id, "completed")
 
