@@ -251,6 +251,15 @@ async def main():
         misfire_grace_time=300,
     )
 
+    # Safety net: close any remaining positions at 5 PM, 6 PM, and 9 AM ET
+    for hour, job_id in [(17, "safety_5pm"), (18, "safety_6pm"), (9, "safety_9am")]:
+        scheduler.add_job(
+            close_stale_positions, CronTrigger(day_of_week="mon-fri", hour=hour, minute=0),
+            kwargs={"bot_send_fn": _send},
+            id=job_id, name=f"Safety close ({hour}:00)",
+            misfire_grace_time=300,
+        )
+
     scheduler.start()
     jobs = scheduler.get_jobs()
     log.info("Scheduler started with %d jobs", len(jobs))
