@@ -307,6 +307,18 @@ async def close_stale_positions(bot_send_fn=None):
                 )
 
             try:
+                # Cancel any open orders for this symbol first (shares held
+                # for pending orders block close_position).
+                open_orders = alpaca.get_orders(status="open")
+                for order in open_orders:
+                    if order.get("symbol") == symbol:
+                        oid = order["id"]
+                        log.info("Cancelling open order %s for %s before closing position", oid, symbol)
+                        try:
+                            alpaca.cancel_order(oid)
+                        except AlpacaError as ce:
+                            log.warning("Cancel order %s failed (may already be done): %s", oid, ce)
+
                 result = alpaca.close_position(symbol)
                 log.info("Closed stale %s: %s", symbol, result.get("id", result))
                 if bot_send_fn:
@@ -552,6 +564,16 @@ async def flatten_check(bot_send_fn=None, send_trade_fn=None):
             sign = "+" if unrealized >= 0 else ""
 
             try:
+                # Cancel open orders first so shares aren't held_for_orders
+                open_orders = alpaca.get_orders(status="open")
+                for order in open_orders:
+                    if order.get("symbol") == symbol:
+                        try:
+                            alpaca.cancel_order(order["id"])
+                            log.info("Cancelled open order %s for %s before flatten", order["id"], symbol)
+                        except AlpacaError:
+                            pass
+
                 result = alpaca.close_position(symbol)
                 order_id = result.get("id", "submitted")
                 log.info("Flatten closed %s (%d shares, %s$%.2f): order %s",
